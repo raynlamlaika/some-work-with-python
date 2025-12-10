@@ -5,3 +5,11 @@ hmmmmmmmmm what a bout making in triding module with ai
 
 first pre trained module are every where i need to just fintuning the module and see the 
 predection  how it gose
+
+
+ip install stable-baselines3 yfinance pandas numpy scikit-learn
+
+
+
+
+some about the lstm first i we have a data the are all ready posted in file

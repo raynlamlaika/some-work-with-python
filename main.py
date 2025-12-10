@@ -1,12 +1,47 @@
-
-
-
-
-
 import json
 import asyncio
 import time
 import websockets
+import pandas as pd
+import numpy as np
+
+def build_state(df, window_size=10):
+    """
+    Returns the last `window_size` rows as a normalized numpy state.
+    This is the direct input for RL/ML prediction.
+    """
+    if df is None or df.shape[0] < window_size:
+        return None
+
+    # Select only numeric columns (avoid symbol)
+    num_df = df.select_dtypes(include=[np.number])
+
+    # Extract last N rows
+    window = num_df.tail(window_size)
+
+    # Convert to NumPy array
+    state = window.to_numpy(dtype=np.float32)
+
+    return state
+
+    
+    
+    
+# # creat in data frame
+def dataframe(dataholder):
+    if len(dataholder) == 0 :
+        print('no data avalible yeeet')
+    else:
+        dataframe = pd.DataFrame(dataholder)
+        colomsname=["open", "high", "low", "close",
+                    "buy_volume", "sell_volume", 
+                    "total_volume", "time_window",
+                    "timestamp"] 
+        for col in colomsname:
+            dataframe[col] = pd.to_numeric(dataframe[col], errors="coerce")
+        dataframe.dropna(inplace=True)
+        return dataframe
+    return None
 
 # ----------- GLOBAL VARIABLES -------------
 LATEST_FEATURE_VECTOR = None            # Last window
@@ -58,12 +93,15 @@ async def prepareData():
         state = reset_window()
 
         print(f"Aggregation every {AGGREGATION_PERIOD_SECONDS}s")
-
+        
+        
+        i  = 0
         while True:
             # Allow user to stop
-            if input("Type 'stop' to quit: ") == "stop":
+            if i == 10:
                 break
-
+            
+            
             # Receive trade
             data = json.loads(await ws.recv())
             price = float(data["p"])
@@ -112,7 +150,8 @@ async def prepareData():
                 print("\n--- NEW WINDOW ---")
                 print(fv)
                 print(f"Total windows saved: {len(ALL_FEATURE_VECTORS)}")
-
+                i+=1
+                
                 # ----------- PASS DATA TO NEXT FUNCTION -----------
                 nextStep()
 
@@ -121,44 +160,94 @@ async def prepareData():
 
 
 
-
-
-
-# pass the data to the module 
-def modulePredect():
-    pass
-
-
 # so right now we have the data next is passing it trough our model
 asyncio.run(prepareData())
 # print('this is the triade history:', TRADE_HISTORY)
-# for hh in TRADE_HISTORY:
-#     print('this is ---------- ',hh,'\n')
+df = dataframe(ALL_FEATURE_VECTORS)
+if df is None:
+    print('this is no data frame')
+    exit(1)
+else:
+    print('\n\n\nthis is the head\n', df.head(5))
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+import gym
+from gym import spaces
+import numpy as np
+
+class TradingEnv(gym.Env):
+    def __init__(self, df, window_size=10):
+        super(TradingEnv, self).__init__()
+        
+        self.df = df
+        self.window_size = window_size
+        self.current_step = window_size
+
+        # Observation = last N candles (flattened)
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf,
+            shape=(window_size * (df.shape[1] - 1),),
+            dtype=np.float32
+        )
+
+        # Actions: 0 = hold, 1 = buy, 2 = sell
+        self.action_space = spaces.Discrete(3)
+
+    def _get_state(self):
+        window = self.df.iloc[self.current_step - self.window_size : self.current_step]
+        window = window.select_dtypes(include=[np.number])
+        return window.values.flatten().astype(np.float32)
+
+    def reset(self):
+        self.current_step = self.window_size
+        return self._get_state()
+
+    def step(self, action):
+        reward = 0  # you can build PnL reward later
+        self.current_step += 1
+
+        done = self.current_step >= len(self.df)
+        next_state = self._get_state() if not done else np.zeros_like(self._get_state())
+
+        return next_state, reward, done, {}
 
 
 
-# the data is stored in TRADE_HISTORY
+from stable_baselines3 import PPO
+import numpy as np
 
+def predict_live_action(df, model_path="trading_ppo.zip", window_size=10):
+    """
+    Use the trained PPO model to make a live prediction from current dataframe.
+    """
+    model = PPO.load(model_path)
 
-# next is 
-# Calculate Technical Indicators (TIs): Use libraries like Ta-Lib or pandas-ta to derive 
-# features (RSI, MACD, SMAs) from the aggregated OHLCV data.
-# Normalize Features: Scale all your numerical input data (OHLCV, TIs) to a range,
-# typically $\mathbf{[0, 1]}$, using techniques like Min-Max scaling.
-# Define Time Steps (Lookback): Select the number of past candles ($N$) your model will analyze for
-# each prediction (e.g., $N=20$).
-# Create Time-Series Sequences: Reshape the feature
-# data into the 3D tensor format $(\text{Samples}, \text{Time Steps}, 
-# \text{Features})$, which is required for RNNs.
-# Define the Prediction Target ($Y$): Decide what the model will predict, 
-# such as the price direction (Classification) of the next candle.
-# Select Model Architecture: Choose a suitable model, most commonly an LSTM 
-# (Long Short-Term Memory) network, for sequential data.
-# Train the Model (Offline): Use historical data to train your chosen
-# model architecture on your prepared sequences ($X$) and targets ($Y$).
-# Evaluate and Tune: Test the model's performance on unseen historical data (validation/test sets)
-# using metrics like accuracy or F1-score.
-# Load the Trained Model: Integrate the finalized, saved model (e.g., .h5 file) 
-# into your live Python trading script.
-# Implement Execution Logic: Write the code to take the model's live 
-# prediction (e.g., 'BUY') and use the Binance REST API to place an actual market order.
+    # Ensure we have enough data
+    if df.shape[0] < window_size:
+        return "not-enough-data"
+
+    # Build the state window
+    numeric_df = df.select_dtypes(include=[np.number])
+    window = numeric_df.tail(window_size)
+    state = window.values.flatten().astype(np.float32)
+
+    # Predict action
+    action, _ = model.predict(state, deterministic=True)
+
+    if action == 1:
+        return "buy"
+    elif action == 2:
+        return "sell"
+    else:
+        return "hold"
