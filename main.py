@@ -1,116 +1,143 @@
-import json, asyncio, websockets, time
-from collections import deque # Recommended for efficient data storage/processing
 
-# --- NEXT STEP 1: Define parameters and data structures ---
 
-# 1.1 Define the aggregation period (e.g., 1 minute = 60 seconds)
-# Your model won't predict on every trade; it will predict based on
-# market features over a larger period.
-AGGREGATION_PERIOD_SECONDS = 60 
 
-# 1.2 Use a deque (Double-ended queue) to efficiently store a rolling window of past trades
-# We'll use this to build our features (OHLCV, Volume pressure, etc.)
-TRADE_HISTORY = deque(maxlen=1000) # Store the last 1000 trades for analysis
 
-async def main():
-    url = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+
+import json
+import asyncio
+import time
+import websockets
+
+# ----------- GLOBAL VARIABLES -------------
+LATEST_FEATURE_VECTOR = None            # Last window
+ALL_FEATURE_VECTORS = []                # All windows ever collected
+DATA_FILE = "live_data.jsonl"           # File for streaming output
+AGGREGATION_PERIOD_SECONDS = 3
+
+# ----------- WRITE ONE WINDOW TO FILE ----------
+def append_to_file(feature_vector):
+    with open(DATA_FILE, "a") as f:
+        f.write(json.dumps(feature_vector) + "\n")
+
+
+# ----------- THE NEXT FUNCTION THAT USES DATA ----------
+def nextStep():
+    if LATEST_FEATURE_VECTOR is None:
+        print("No data yet...")
+        return
     
+    print("Next step using data:")
+    print(LATEST_FEATURE_VECTOR)
+
+    # Here you can:
+    # model.predict(LATEST_FEATURE_VECTOR)
+    # calculate indicators
+    # send signals
+    # etc.
+
+
+# ----------- MAIN WEBSOCKET FUNCTION -------------
+async def prepareData():
+    global LATEST_FEATURE_VECTOR, ALL_FEATURE_VECTORS
+
+    url = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+
     async with websockets.connect(url) as ws:
-        
-        # --- NEXT STEP 2: Initialize aggregation variables ---
-        
-        # Variables to track the Open, High, Low, Close (OHLC) for the current window
-        current_open = None
-        current_high = -float('inf')
-        current_low = float('inf')
-        
-        # Variables to track buy/sell volume pressure
-        buy_volume = 0.0
-        sell_volume = 0.0
-        
-        # Set the starting time for the first aggregation window
-        window_start_time = time.time()
-        
-        print(f"Starting data stream. Aggregating data every {AGGREGATION_PERIOD_SECONDS} seconds...")
+
+        def reset_window():
+            return {
+                "symbol": "",
+                "open": None,
+                "high": -float("inf"),
+                "low": float("inf"),
+                "buy_vol": 0.0,
+                "sell_vol": 0.0,
+                "start": time.time()
+            }
+
+        state = reset_window()
+
+        print(f"Aggregation every {AGGREGATION_PERIOD_SECONDS}s")
 
         while True:
-            msg = await ws.recv()
-            data = json.loads(msg)
-            
-            # Extract key trade data for easier processing
-            trade_price = float(data['p'])
-            trade_quantity = float(data['q'])
-            is_seller_maker = data['m'] # True if the seller was the market maker (i.e., a buy was executed)
+            # Allow user to stop
+            if input("Type 'stop' to quit: ") == "stop":
+                break
 
-            # --- NEXT STEP 3: Update OHLCV & Volume Pressure for the current window ---
+            # Receive trade
+            data = json.loads(await ws.recv())
+            price = float(data["p"])
+            qty = float(data["q"])
+            is_sell = data["m"]
+
+            # OHLC
+            if state["open"] is None:
+                state["open"] = price
             
-            # 3.1 Update Open Price (set only on the first trade of the window)
-            if current_open is None:
-                current_open = trade_price
-            
-            # 3.2 Update High and Low Price
-            current_high = max(current_high, trade_price)
-            current_low = min(current_low, trade_price)
-            
-            # 3.3 Update Buy/Sell Volume Pressure
-            if is_seller_maker:
-                # The trade was initiated by a market SELL (Taker Sold, Maker Bought)
-                sell_volume += trade_quantity
+            state["symbol"] = data["s"]
+            state["high"] = max(state["high"], price)
+            state["low"] = min(state["low"], price)
+
+            # Volume pressure
+            if is_sell:
+                state["sell_vol"] += qty
             else:
-                # The trade was initiated by a market BUY (Taker Bought, Maker Sold)
-                buy_volume += trade_quantity
+                state["buy_vol"] += qty
 
-            # Add the raw trade data to our history deque (for future advanced features)
-            TRADE_HISTORY.append({'p': trade_price, 'q': trade_quantity, 'm': is_seller_maker})
+            # Window ready?
+            if time.time() - state["start"] >= AGGREGATION_PERIOD_SECONDS:
 
-
-            # --- NEXT STEP 4: Feature Engineering and Model Input (The Critical Step) ---
-            
-            # Check if the aggregation time has passed (e.g., 60 seconds)
-            if time.time() - window_start_time >= AGGREGATION_PERIOD_SECONDS:
-                
-                # The 'Close' price is the price of the last trade in the window
-                current_close = trade_price
-                total_volume = buy_volume + sell_volume
-                
-                # Create the FEATURE VECTOR (Input for your AI model)
-                feature_vector = {
-                    'time_window': AGGREGATION_PERIOD_SECONDS,
-                    'open': current_open,
-                    'high': current_high,
-                    'low': current_low,
-                    'close': current_close,
-                    'total_volume': total_volume,
-                    'buy_volume': buy_volume,
-                    'sell_volume': sell_volume,
-                    # Add more advanced features here (e.g., RSI, MACD, etc., calculated from past windows)
+                # Build WINDOW FEATURE VECTOR
+                fv = {
+                    "symbol": state["symbol"],
+                    "time_window": AGGREGATION_PERIOD_SECONDS,
+                    "open": state["open"],
+                    "high": state["high"],
+                    "low": state["low"],
+                    "close": price,
+                    "buy_volume": state["buy_vol"],
+                    "sell_volume": state["sell_vol"],
+                    "total_volume": state["buy_vol"] + state["sell_vol"],
+                    "timestamp": time.time()
                 }
-                
-                print("\n--- NEW FEATURE VECTOR READY ---")
-                print(feature_vector)
-                
-                # 4.1. **TRAIN/PREDICT HERE:** This is where you would pass the `feature_vector`
-                #      into your trained Machine Learning model (e.g., LSTM, XGBoost).
-                #      The model's output would be your predicted action (buy/sell/hold)
-                # predicted_action = your_model.predict(feature_vector) 
-                
-                # 4.2. **EXECUTE TRADE (If applicable):** Based on the prediction, you
-                #      would send an order to Binance's REST API.
-                # if predicted_action == 'buy':
-                #    execute_buy_order(...)
+
+                # ----------- GLOBAL STORE -----------
+                LATEST_FEATURE_VECTOR = fv
+                ALL_FEATURE_VECTORS.append(fv)
+
+                # ----------- WRITE TO FILE -----------
+                append_to_file(fv)
+
+                # ----------- PRINT -----------
+                print("\n--- NEW WINDOW ---")
+                print(fv)
+                print(f"Total windows saved: {len(ALL_FEATURE_VECTORS)}")
+
+                # ----------- PASS DATA TO NEXT FUNCTION -----------
+                nextStep()
+
+                # Reset for next window
+                state = reset_window()
 
 
-                # --- NEXT STEP 5: Reset the window for the next period ---
-                current_open = None # The new 'Open' will be the next trade price
-                current_high = -float('inf')
-                current_low = float('inf')
-                buy_volume = 0.0
-                sell_volume = 0.0
-                window_start_time = time.time() # Reset the timer
+
+
+
+
+# pass the data to the module 
+def modulePredect():
+    pass
+
 
 # so right now we have the data next is passing it trough our model
-asyncio.run(main())
+asyncio.run(prepareData())
+# print('this is the triade history:', TRADE_HISTORY)
+# for hh in TRADE_HISTORY:
+#     print('this is ---------- ',hh,'\n')
 
+
+
+# the data is stored in TRADE_HISTORY
 
 
 # next is 
